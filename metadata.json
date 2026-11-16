@@ -1,0 +1,6 @@
+{
+  "name": "ClarifySQL",
+  "description": "Database-aware Generative AI Text-to-SQL workspace with ambiguity detection, targeted clarification, AST SQL validation, and safe query execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
