@@ -11,6 +11,9 @@ import type {
 const MAX_EXECUTION_ROWS = 500;
 
 function sanitizeIdentifier(raw: string, fallbackPrefix: string, index: number): string {
+  if (/^__EMPTY(?:_\d+)?$/i.test(raw.trim())) {
+    return `${fallbackPrefix}_${index + 1}`;
+  }
   const cleaned = raw
     .trim()
     .toLowerCase()
@@ -27,6 +30,12 @@ function sanitizeIdentifier(raw: string, fallbackPrefix: string, index: number):
     return `${cleaned}_col`;
   }
   return cleaned;
+}
+
+function filterNonEmptyRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return rows.filter((row) =>
+    Object.values(row).some((v) => v !== null && v !== undefined && String(v).trim() !== '')
+  );
 }
 
 function normalizeCellValue(val: unknown): string | number | null {
@@ -259,20 +268,19 @@ export class SqliteDatasetEngine {
     });
   }
 
-  importUploadedFile(fileName: string, buffer: Buffer): DatasetMetadata {
-    const workbook = XLSX.read(buffer, { type: 'buffer' });
-    const firstSheetName = workbook.SheetNames[0];
-    if (!firstSheetName) {
-      throw new Error('Uploaded file has no readable sheets.');
-    }
-    const sheet = workbook.Sheets[firstSheetName];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+  importParsedRows(
+    fileName: string,
+    rawRows: Array<Record<string, unknown>>,
+    sheetName?: string
+  ): DatasetMetadata {
+    const rows = filterNonEmptyRows(rawRows);
     if (rows.length === 0) {
-      throw new Error('Uploaded dataset is empty. Provide at least 1 data row and a header row.');
+      throw new Error('Uploaded dataset is empty. Provide at least 1 non-empty data row and a header row.');
     }
 
-    const baseName = fileName.replace(/\.(csv|tsv|xlsx|xls)$/i, '').trim() || 'Uploaded Dataset';
-    const baseSlug = sanitizeIdentifier(baseName, 'dataset', this.datasets.size);
+    const rawBaseName = fileName.replace(/\.(csv|tsv|xlsx|xls)$/i, '').trim() || 'Uploaded Dataset';
+    const baseName = sheetName && sheetName !== 'Sheet1' ? `${rawBaseName} (${sheetName})` : rawBaseName;
+    const baseSlug = sanitizeIdentifier(rawBaseName, 'dataset', this.datasets.size);
     let uniqueId = baseSlug;
     let counter = 2;
     while (this.datasets.has(uniqueId)) {
@@ -283,10 +291,47 @@ export class SqliteDatasetEngine {
       id: uniqueId,
       name: baseName,
       tableName: uniqueId,
-      description: `Uploaded dataset from ${fileName} (${rows.length} rows).`,
+      description: `Uploaded dataset from ${fileName}${sheetName ? ` [sheet: ${sheetName}]` : ''} (${rows.length} rows).`,
       rows,
       isBuiltin: false,
     });
+  }
+
+  importUploadedFile(fileName: string, buffer: Buffer, preferredSheetName?: string): DatasetMetadata {
+    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+      throw new Error('Uploaded file has no readable sheets.');
+    }
+
+    const sheetsToTry = preferredSheetName && workbook.SheetNames.includes(preferredSheetName)
+      ? [preferredSheetName]
+      : workbook.SheetNames;
+
+    let selectedSheetName: string | undefined;
+    let selectedRows: Array<Record<string, unknown>> = [];
+
+    for (const candidateName of sheetsToTry) {
+      const sheet = workbook.Sheets[candidateName];
+      if (!sheet) continue;
+      const parsed = filterNonEmptyRows(
+        XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null, raw: true })
+      );
+      if (parsed.length > 0) {
+        selectedSheetName = candidateName;
+        selectedRows = parsed;
+        break;
+      }
+    }
+
+    if (!selectedSheetName || selectedRows.length === 0) {
+      throw new Error('Uploaded dataset is empty. Provide at least 1 data row and a header row.');
+    }
+
+    return this.importParsedRows(
+      fileName,
+      selectedRows,
+      workbook.SheetNames.length > 1 ? selectedSheetName : undefined
+    );
   }
 
   listDatasets(): DatasetMetadata[] {

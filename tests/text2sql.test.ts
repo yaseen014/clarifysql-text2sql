@@ -386,4 +386,30 @@ describe('Text-to-SQL Reliability & Ambiguity Pipeline', () => {
     expect(res.execution).toBeNull();
     expect(res.errorMessage).toContain('429');
   });
+
+  it('imports Excel (.xlsx) files with empty first sheets, blank trailing rows, and JSON parsed rows', async () => {
+    const XLSX = await import('xlsx');
+    const wb = XLSX.utils.book_new();
+    const emptySheet = XLSX.utils.aoa_to_sheet([]);
+    const dataSheet = XLSX.utils.json_to_sheet([
+      { Item: 'Widget A', Price: 25.5, Units: 10 },
+      { Item: null, Price: null, Units: null },
+      { Item: 'Widget B', Price: 40, Units: 5 },
+    ]);
+    XLSX.utils.book_append_sheet(wb, emptySheet, 'Cover');
+    XLSX.utils.book_append_sheet(wb, dataSheet, 'Inventory');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+
+    const uploadedXlsx = sqliteEngine.importUploadedFile('my_excel_data.xlsx', buffer);
+    expect(uploadedXlsx.rowCount).toBe(2);
+    expect(uploadedXlsx.columns.map((c) => c.name)).toEqual(['item', 'price', 'units']);
+
+    const viaJson = sqliteEngine.importParsedRows('my_excel_json.xlsx', [
+      { Department: 'CS', Budget: 12000 },
+      { Department: '', Budget: '' },
+      { Department: 'Math', Budget: 9000 },
+    ], 'Sheet2');
+    expect(viaJson.rowCount).toBe(2);
+    expect(viaJson.name).toContain('Sheet2');
+  });
 });

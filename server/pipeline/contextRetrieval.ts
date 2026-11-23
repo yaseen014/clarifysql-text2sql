@@ -23,10 +23,19 @@ function tokenize(text: string): string[] {
     .filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
 }
 
-function singularize(token: string): string {
-  if (token.endsWith('ies') && token.length > 4) return token.slice(0, -3) + 'y';
-  if (token.endsWith('s') && token.length > 3) return token.slice(0, -1);
-  return token;
+function stemVariants(token: string): string[] {
+  const variants = new Set<string>([token]);
+  if (token.endsWith('ies') && token.length > 4) variants.add(token.slice(0, -3) + 'y');
+  if (token.endsWith('s') && token.length > 3) variants.add(token.slice(0, -1));
+  if (token.endsWith('ed') && token.length > 4) {
+    variants.add(token.slice(0, -2));
+    variants.add(token.slice(0, -1));
+  }
+  if (token.endsWith('ing') && token.length > 5) {
+    variants.add(token.slice(0, -3));
+    variants.add(token.slice(0, -3) + 'e');
+  }
+  return Array.from(variants);
 }
 
 function formatStatsSummary(col: ColumnProfile): string {
@@ -47,7 +56,7 @@ export function retrieveDatabaseContext(
   searchLiveDbValues = true
 ): RetrievedDatabaseContext {
   const rawTokens = tokenize(question);
-  const queryTokens = Array.from(new Set(rawTokens.flatMap((t) => [t, singularize(t)])));
+  const queryTokens = Array.from(new Set(rawTokens.flatMap((t) => stemVariants(t))));
 
   const scoredColumns: RetrievedColumnContext[] = dataset.columns.map((col) => {
     let score = 0;
@@ -56,7 +65,7 @@ export function retrieveDatabaseContext(
 
     const colNameLower = col.name.toLowerCase();
     const origLower = col.originalName.toLowerCase();
-    const colParts = colNameLower.split('_').flatMap((p) => [p, singularize(p)]);
+    const colParts = colNameLower.split('_').flatMap((p) => stemVariants(p));
 
     // 1. Schema name matching
     for (const token of queryTokens) {
@@ -102,16 +111,23 @@ export function retrieveDatabaseContext(
       }
     }
 
-    // 3. Preserve key identifier and numeric metric columns so ambiguity across metrics is visible
+    // 3. Preserve key identifiers, summary metrics, and categorical outcomes across wide schemas
     if (col.name.endsWith('_id') || col.name.includes('name') || col.name === 'title') {
       score += 2;
       if (reasons.length === 0) reasons.push('Primary entity identifier');
+    }
+    if (
+      /^(sgpa|cgpa|gpa|result|status|outcome|grade|rank|percentage|pct|score)$/i.test(colNameLower) ||
+      colNameLower.startsWith('total_')
+    ) {
+      score += 2.5;
+      if (reasons.length === 0) reasons.push('Overall summary / outcome attribute');
     }
     if (col.type === 'INTEGER' || col.type === 'REAL') {
       score += 1.5;
       if (reasons.length === 0) reasons.push('Numeric metric / attribute');
     }
-    if (col.distinctCount > 1 && col.distinctCount <= 12 && col.type === 'TEXT') {
+    if (col.distinctCount >= 1 && col.distinctCount <= 12 && col.type === 'TEXT') {
       score += 1;
       if (reasons.length === 0) reasons.push('Low-cardinality categorical attribute');
     }
@@ -131,9 +147,9 @@ export function retrieveDatabaseContext(
 
   scoredColumns.sort((a, b) => b.relevanceScore - a.relevanceScore);
 
-  // For compact schemas (<= 16 cols), include all columns ranked by relevance so ambiguity and missing-column checks have full visibility;
-  // for wide schemas (> 16 cols), select top 14 highest-scoring columns.
-  const selectedColumns = dataset.columns.length <= 16 ? scoredColumns : scoredColumns.slice(0, 14);
+  // For schemas up to 45 columns (including wide multi-subject sheets), retain all columns ranked by relevance
+  // so ambiguity across metrics and summary columns like SGPA/result are fully visible; for ultra-wide schemas (> 45), select top 24.
+  const selectedColumns = dataset.columns.length <= 45 ? scoredColumns : scoredColumns.slice(0, 24);
 
   return {
     datasetId: dataset.id,
@@ -144,8 +160,8 @@ export function retrieveDatabaseContext(
     retrievedColumns: selectedColumns,
     allColumnNames: dataset.columns.map((c) => c.name),
     retrievalMethod:
-      dataset.columns.length <= 16
+      dataset.columns.length <= 45
         ? 'Ranked schema + live DB value probing (all columns retained for ambiguity visibility)'
-        : 'Top-14 ranked schema + live DB value probing',
+        : 'Top-24 ranked schema + live DB value probing',
   };
 }

@@ -12,14 +12,14 @@ import { runRegressionSuite } from './server/pipeline/regressionSuite';
 const PORT = 3000;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 15 * 1024 * 1024 },
 });
 
 export async function createAppServer() {
   await sqliteEngine.init();
 
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({
@@ -49,16 +49,42 @@ export async function createAppServer() {
     }
   });
 
-  app.post('/api/datasets/upload', upload.single('file'), (req, res) => {
+  app.post('/api/datasets/upload', (req, res) => {
+    upload.single('file')(req, res, (uploadErr) => {
+      if (uploadErr) {
+        return res.status(400).json({
+          error: uploadErr instanceof Error ? uploadErr.message : 'File upload failed.',
+        });
+      }
+      try {
+        if (!req.file) {
+          return res.status(400).json({ error: 'No file provided. Please upload a CSV or XLSX file.' });
+        }
+        const allowedExt = /\.(csv|tsv|xlsx|xls)$/i;
+        if (!allowedExt.test(req.file.originalname)) {
+          return res.status(400).json({ error: 'Unsupported file format. Upload .csv, .tsv, .xlsx, or .xls.' });
+        }
+        const dataset = sqliteEngine.importUploadedFile(req.file.originalname, req.file.buffer);
+        return res.status(201).json({ dataset });
+      } catch (err) {
+        return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+  });
+
+  app.post('/api/datasets/import-json', (req, res) => {
     try {
-      if (!req.file) {
-        return res.status(400).json({ error: 'No file provided. Please upload a CSV or XLSX file.' });
+      const { fileName, sheetName, rows } = req.body as {
+        fileName?: string;
+        sheetName?: string;
+        rows?: Array<Record<string, unknown>>;
+      };
+      if (!fileName || !Array.isArray(rows) || rows.length === 0) {
+        return res.status(400).json({
+          error: 'Parsed dataset rows and fileName are required.',
+        });
       }
-      const allowedExt = /\.(csv|tsv|xlsx|xls)$/i;
-      if (!allowedExt.test(req.file.originalname)) {
-        return res.status(400).json({ error: 'Unsupported file format. Upload .csv, .tsv, .xlsx, or .xls.' });
-      }
-      const dataset = sqliteEngine.importUploadedFile(req.file.originalname, req.file.buffer);
+      const dataset = sqliteEngine.importParsedRows(fileName, rows, sheetName);
       return res.status(201).json({ dataset });
     } catch (err) {
       return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
